@@ -27,7 +27,7 @@ from vlm_screen import load_api_key, url_for
 
 BASE = Path(__file__).parent
 XCHECK_MODEL = "gemini-pro-latest"
-XCHECK_VERSION = "xcheck-v3"  # v3: 공식 서류구분(fail/보완)·여행경보·자격규칙을 reference_data 에서 주입
+XCHECK_VERSION = "xcheck-v3.1"  # v3: 공식 서류구분(fail/보완)·여행경보·자격규칙을 reference_data 에서 주입. v3.1: 3개월 발급기준을 건강보험확인서로 한정(사업자등록증 오탐 수정) + 타임아웃 재시도
 
 REFS = json.loads((BASE / "data/reference_data.json").read_text(encoding="utf-8"))
 
@@ -39,7 +39,7 @@ XCHECK_PROMPT = """당신은 정부 지원사업 적격심사 보조원입니다
 1. representative_match — 서약서·공문에 서명/날인한 사람이 사업자등록증 또는 법인등기부의 대표자와 일치하는가. 대표자가 아닌 사람(예: 연구소장, 이사)이 서약서에 서명했다면 mismatch 로 하고 누가 서명했어야 하는지 detail 에 쓰세요.
 2. company_name_consistency — 기관/법인명이 문서 간 일관적인가. (주)↔주식회사, 띄어쓰기 차이는 같은 것으로 간주.
 3. reg_no_consistency — 사업자등록번호·법인등록번호가 문서 간 서로 일치하는가. 비교할 값이 한 문서에만 있으면 not_applicable.
-4. date_anomalies — 작성일·발급일의 이상 (예: 증명서 발급일이 제출 시점 기준 3개월 초과 경과, 작성일 누락, 미래 날짜).
+4. date_anomalies — 작성일·발급일의 이상. **3개월 이내 발급 기준은 건강보험자격득실확인서에만 적용됩니다** — 사업자등록증·법인등기부 등 다른 증명서는 발급일이 오래됐다고 이상이 아닙니다(폐업 후 재등록처럼 실제 문제가 있는 경우만 예외). 그 외 확인할 것: 작성일 누락, 미래 날짜, 발급일이 작성일보다 늦는 등 순서가 맞지 않는 경우.
 5. document_set — 서류 묶음 관점의 특이사항 (빈 양식 제출, 페이지 누락 문서, 서명 누락 문서 종합).
 6. country_eligibility — 사업 대상 국가/지역이 여행경보 기준을 통과하는가. 아래 '여행경보 판정 기준'과 '대상 국가 여행경보 정보'만 근거로 판단하세요. 제안 지역이 3단계(출국권고)·4단계(여행금지)·특별여행주의보 지역에 해당하면 mismatch, 대상 지역이 특정되지 않았는데 그 국가에 3단계 이상 지역이 존재하면 uncertain (어느 지역인지 확인 필요하다고 detail 에 쓰기), 경보 정보가 없는 국가면 uncertain (외교부 0404 확인 필요). 대상 국가 자체가 추출 안 됐으면 uncertain.
 7. eligibility_rules — 아래 '지원자격 규칙'을 추출값에 적용할 수 있는 항목만 판정하세요 (자산총계 120억 기준 성숙기업, 국내 법인 여부, 업력 10년). 판정에 필요한 값이 추출 안 됐거나 규칙에 '확인필요' 조건이 걸리면 uncertain. 어떤 값으로 어떻게 계산했는지 detail 에 쓰세요.
@@ -167,8 +167,14 @@ def cross_check(submission: str, records: list[dict], results_path: Path,
         "generationConfig": {"response_mime_type": "application/json", "temperature": 0},
     }
     for attempt in range(3):
-        resp = requests.post(url_for(XCHECK_MODEL), json=body, timeout=180,
-                             headers={"X-goog-api-key": api_key})
+        try:
+            resp = requests.post(url_for(XCHECK_MODEL), json=body, timeout=240,
+                                 headers={"X-goog-api-key": api_key})
+        except requests.exceptions.RequestException as e:
+            # 타임아웃·연결끊김 등 네트워크 레벨 오류도 재시도 (기존엔 HTTP 상태코드만 재시도했음)
+            print(f"  [재시도 {attempt + 1}/3] 네트워크 오류: {e}")
+            time.sleep(5 * (attempt + 1))
+            continue
         if resp.status_code == 429 or resp.status_code >= 500:
             time.sleep(5 * (attempt + 1))
             continue
