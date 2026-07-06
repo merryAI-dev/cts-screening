@@ -78,6 +78,12 @@ python3.14 cross_check.py converted/screening_results_*.json  # 교차검증
 python3.14 excel_report.py <screening.json> <xcheck.json> 심사표.xlsx
 ```
 
+## 대규모 심사 (200~300기업)
+
+모델 티어링(flash/pro 역할 분담), 비용·시간 추정, 배치 API 도입 판단은
+[docs/SCALING.md](docs/SCALING.md) 참고. 워커 수는 CLI 둘째 인자:
+`screen_batch.py <dir> 10`, `cross_check.py <json> 4`.
+
 ## 알아둘 것
 
 - **첫 실행은 문서 전량을 Gemini에 호출**합니다 (제출 7건·77파일 기준 15~30분, API 비용 발생). 응답은 `cache/`에 캐시되어 재실행 시 재사용됩니다. 캐시는 지원서 데이터를 포함하므로 repo에 올라가지 않습니다.

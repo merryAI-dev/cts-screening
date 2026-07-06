@@ -9,7 +9,7 @@
 PDF 를 다시 보내지 않는다 — screen_batch 가 추출해둔 구조화 데이터(텍스트)만
 제출건당 1회 gemini-pro-latest 에 보낸다. 응답은 캐시된다.
 
-usage: python cross_check.py <screening_results.json>
+usage: python cross_check.py <screening_results.json> [workers=4]
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -168,7 +169,7 @@ def cross_check(submission: str, records: list[dict], results_path: Path,
     }
     for attempt in range(3):
         try:
-            resp = requests.post(url_for(XCHECK_MODEL), json=body, timeout=240,
+            resp = requests.post(url_for(XCHECK_MODEL), json=body, timeout=600,
                                  headers={"X-goog-api-key": api_key})
         except requests.exceptions.RequestException as e:
             # 타임아웃·연결끊김 등 네트워크 레벨 오류도 재시도 (기존엔 HTTP 상태코드만 재시도했음)
@@ -197,6 +198,7 @@ def main() -> int:
         print(__doc__)
         return 1
     results_path = Path(sys.argv[1])
+    workers = int(sys.argv[2]) if len(sys.argv) > 2 else 4
     all_records = json.loads(results_path.read_text(encoding="utf-8"))
 
     by_sub: dict[str, list[dict]] = {}
@@ -207,8 +209,8 @@ def main() -> int:
     cache = VLMCache(BASE / "cache/vlm",
                      prompt_version=f"{XCHECK_VERSION}@{XCHECK_MODEL}")
 
-    out = []
-    for sub, records in sorted(by_sub.items()):
+    def one(item: tuple[str, list[dict]]) -> dict:
+        sub, records = item
         fail_miss, supp_miss = missing_required(records)
         xc = cross_check(sub, records, results_path, cache, api_key)
         xc["missing_required_docs"] = fail_miss + supp_miss  # 하위 호환 (excel_report 등)
@@ -216,8 +218,18 @@ def main() -> int:
         xc["missing_supplement_docs"] = supp_miss    # 대면심사 시 보완요청
         if (fail_miss or supp_miss) and xc.get("overall") == "ok":
             xc["overall"] = "issues_found"
-        out.append(xc)
+        return xc
 
+    # 제출건 간 의존성이 없으므로 병렬 처리 (300건 규모: 순차 3h+ → 워커 4 기준 ~50분)
+    items = sorted(by_sub.items())
+    print(f"제출 {len(items)}건 / workers={workers}")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        out = list(pool.map(one, items))
+
+    for xc in out:
+        sub = xc["submission"]
+        fail_miss = xc["missing_fail_docs"]
+        supp_miss = xc["missing_supplement_docs"]
         print(f"\n=== {sub} [{'cache' if xc.get('cache_hit') else 'api'}] → {xc.get('overall')}")
         if fail_miss:
             print(f"  [적격탈락급 누락] {', '.join(fail_miss)}")
